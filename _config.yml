@@ -71,7 +71,7 @@ kramdown:
 # Sidebar settings
 sidebar: true                           # whether or not using Sidebar.
 sidebar-about-description: "云倒影在海上<br>思想在这里停留"
-sidebar-avatar: img/youwuwei.jpg      # use absolute URL, seeing it's used in both `/` and `/about/`
+sidebar-avatar: /img/youwuwei.jpg      # use absolute URL, seeing it's used in both `/` and `/about/`
 
 
 

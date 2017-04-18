@@ -4,7 +4,7 @@
 
 本文主要讲述C++ new运算符、operator new、placement new 之间的种种关联，以及operaor new的重载。
 > **提示：** STL容器所使用的heap内存是由容器所拥有的分配器对象（allocator objects)管理，不是被new和delete直接管理。
-gcc 3.4.6 默认的allocator是不带cache的,只是对new/delete的简单封装。stl而出现内存没有回收的问题，那么一定是libc的cache没有释放，并不是stl的原因
+gcc 3.4.6 默认的allocator是不带cache的,只是对new/delete的简单封装。stl出现内存没有回收的问题，那么一定是libc的cache没有释放，并不是stl的原因
 
 -------------------
 
@@ -22,15 +22,15 @@ namespace std {
 set_new_handler是一个获取new_handler并返回一个旧的new_handler的函数。
 当operator new无法满足内存申请时，它会不断调用new-handler函数，直到找到足够的内存。
 一个设计良好的new-handler函数必须做以下事情：
-<br />1. 让更多内存可被使用。
-<br />2. 安装新的new-handler。
-<br />3. 卸载旧的new-handler。
-<br />4. 抛出bad_alloc（或派生自bad_alloc)的异常。该异常不会被operator new捕捉，因此会被传播到内存索求处。
-<br />5. 不返回，通常调用abort或exit。
+1. 让更多内存可被使用。
+2. 安装新的new-handler。
+3. 卸载旧的new-handler。
+4. 抛出bad_alloc（或派生自bad_alloc)的异常。该异常不会被operator new捕捉，因此会被传播到内存索求处。
+5. 不返回，通常调用abort或exit。
 ## new运算符和operator new()
 
 >  operator new can be called explicitly as a regular function, but in C++, new is an operator with a very specific behavior: An expression with the new operator, first calls function operator new (i.e., this function) with the size of its type specifier as first argument, and if this is successful, it then automatically initializes or constructs the object (if needed). Finally, the expression evaluates as a pointer to the appropriate type. 
-&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;;&emsp;&emsp;;&emsp;&emsp;;&emsp;&emsp;;&emsp;&emsp;;&emsp;&emsp;;&emsp;&emsp;;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;—— [new运算符和operator new](https://www.cplusplus.com)
+&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;&emsp;—— [new运算符和operator new](https://www.cplusplus.com)
 
  比如我们写下代码：A* a = new A;
  实际上这里分为两步： 1. 分配内存   2. 构造对象

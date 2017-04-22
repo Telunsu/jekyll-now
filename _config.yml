@@ -1,10 +1,10 @@
 # Site settings
-title: Suiyueran Blog
-SEOTitle: 随遇而安的博客 | Youww Blog
+title: West Blog
+SEOTitle: West 的博客 | West Blog
 header-img: img/home-bg.jpg
 email: youwuwei1989@qq.com
-description: "关于Linux服务端开发 | 游武卫，Linux fans，| 这里是 游武卫 的个人博客"
-keyword: "Sherry的男朋友"
+description: "关于Linux服务端开发 | West，Linux fans，| 这里是 West 的个人博客"
+keyword: "Baidu"
 url: ""              # your host, for absolute URL
 baseurl: ""                             # for example, '/blog' if your blog hosted on 'host/blog'
 

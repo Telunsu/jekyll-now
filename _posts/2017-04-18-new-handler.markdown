@@ -1,6 +1,4 @@
-
 # C++ 内存分配(new，operator new)详解
-
 
 本文主要讲述C++ new运算符、operator new、placement new 之间的种种关联，以及operaor new的重载。
 > **提示：** STL容器所使用的heap内存是由容器所拥有的分配器对象（allocator objects)管理，不是被new和delete直接管理。

@@ -1,0 +1,194 @@
+# Thread库
+
+本文旨在介绍common库中有关线程、线程池相关的具体实现。
+## pthread
+本节介绍pthread.h库的常用函数,使用该库的函数必须链接-pthread。
+### 线程标识符
+```
+// 比较两个线程ID是否相等
+int pthread_equal(pthread_t tid1, pthread_t tid2)
+
+// 获取自身的pthread_t
+pthread_t pthread_self(void);
+```
+
+Linux在内核2.6版本之前用的**LinuxThread**，**内核2.6开始有了新的线程实现方式NPTL** ，**NPTL号称解决了LinuxThread中绝大多数跟POSIX标准不兼容的特性**。
+（2.4.20内核版本的redhat貌似已经采用了NPTL，历史问题不探究了）
+
+总之老版本的Linux下同一进程不同线程调用getpid返回线程自身的进程号。*这一描述其实并不准确，Linux下并不存在真正的线程，无论进程还是线程实际上在其设计理念中都仅仅是**COE--context of execution**,linus认为纠结于何为线程何为进程没有意义（1996年的一个邮件中）。*
+
+这里不得不说到LinuxThread的一个特性，当你创建第一个线程时，也就会自动创建一个管理线程，这个过程对用户是透明的。所以如果你还在使用 LinuxThread线程库，当你创建一个线程后ps的结果会是有三个相同的进程而不是两个。这个管理线程主要作用是管理线程的创建与终止，所以如果你 把这个管理线程kill掉后, 当你的某个线程退出后就会出现Zombie进程。另外，因为线程的创建与终止都要通过这个管理线程，在一个频繁创建与终止线程的程序这个线程很可能成为性 能的瓶颈。
+
+2.6内核的Linux线程中调用getpid返回的进程号就是主线程的进程号，要想获取线程真正的进程号，必须使用gettid。但是gettid，Glibc出于可移植性的考虑，并没有真正封装。
+通常gettid的实现是用syscall的方式，glog就是这么实现的（GetTID函数）。
+```
+__NR_gettid的宏定义见/usr/include/asm/unistd_64.h或者/usr/include/asm/unistd_64.h
+在32位系统中__NR_gettid=224，在64位系统中__NR_gettid=186
+// 下面两种方式等价
+syscall(SYS_gettid);
+syscall(__NR_gettid);
+```
+
+> http://www.ibm.com/developerworks/cn/linux/l-threading.html （总结的很好）
+https://gold.xitu.io/entry/56daf0047664bf0052f0bdbd
+http://blog.csdn.net/bysun2013/article/details/14209577
+
+### 线程创建
+```
+// thread返回线程的pthread_t
+// attr指定新创建线程的属性，若为NULL，则创建默认属性的线程
+// start_routine表示线程执行的函数地址
+// start_routine只接受一个void*的参数，arg即为传入的参数。若函数需要接受多个参数，需要将这多个参数构造成一个结构体再传入。
+int pthread_create(pthread_t* thread, 
+           const pthread_attr_t* attr,
+           void* (*start_routine)(void*), void* arg);
+```
+### 线程终止
+单个线程有三种退出方式，**在不终止整个进程的情况下停止它的控制流**：
+1. 线程从其启动例程中返回，返回值是线程的退出码。
+2. 被同一进程的其他线程取消。
+3. 调用pthread_exit。
+
+```
+// ret可被pthread_join访问，注意该指针指向的值必须在pthread_exit调用返回后依旧有效，不然会出现非法访问，毕竟返回的值pthread_join可能需要获取到。
+void pthread_exit(void* ret);
+
+// 阻塞，直至线程退出，retval用于获取线程退出的返回信息，若不关注可以设为NULL
+// 如果线程已经detach，则该调用失败，返回EINVAL
+int pthread_join(pthread_t tid, void **retval);
+
+// 在默认情况下，pthread_cancel函数会使tid线程的行为表现类似于调用了pthread_exit(PTHREAD_CANCELD
+// 但是，tid线程可以选择忽略取消方式或者控制取消方式。（线程默认是接受取消请求）
+// 注意，pthread_cancel并不等待线程终止，它仅仅是提出请求。
+int pthread_cancel(pthread_t tid)
+```
+
+> 对于线程取消点相关的内容可以阅读该链接：http://www.cnblogs.com/lijunamneg/archive/2013/01/25/2877211.html
+
+### 线程清理程序
+与进程的atexit函数类似，线程同样也可以设置其清理程序。可以设置多个清理程序，清理程序的执行顺序与atexit同理，都被记录在一个栈中，后进先出。
+
+封装线程时候，通常pthread_cleanup_push和pthread_cleanup_pop之间执行的函数才是真正的逻辑。
+```
+void pthread_cleanup_push(void (*routine)(void *), void *arg);
+// 弹出并执行清理程序
+// execute为0，清理函数将不被调用，但是还是会删除上次push调用建立的清理处理程序。
+void pthread_cleanup_pop(int execute);
+```
+注意这两个函数有一个限制，**他们可能是实现为宏。因此必须在线程相同的作用域中以匹配对的形式使用。**pthread_cleanup_push的宏定义可包含字符'{'，在这种情况下对于的匹配字符'}'就要在pthread_cleanup_pop定义中出现。
+宏实现：
+```
+#define pthread_cleanup_push(routine,arg)                                     \
+{ struct _pthread_cleanup_buffer _buffer;                                   \
+    _pthread_cleanup_push (&_buffer, (routine), (arg));
+#define pthread_cleanup_pop(execute)                                          \
+    _pthread_cleanup_pop (&_buffer, (execute)); }
+```
+从pthread_cleanup_push()的调用点到pthread_cleanup_pop()之间的程序段中的**终止动作**都将执行pthread_cleanup_push()所指定的清理函数，终止动作包括:
+1. 调用pthread_exit时。
+2. 响应取消请求。
+3. 用非零execute参数调用pthread_cleanup_pop。
+
+> 注意：**return语句并不会引起pthread_cleanup_pop**。
+*
+**关于pthread_exit()和return**
+理论上说，pthread_exit()和线程宿体函数退出的功能是相同的，函数结束时会在内部自动调用pthread_exit()来清理线程相关的资源。但实际上二者由于编译器的处理有很大的不同。
+在进程主函数（main()）中调用pthread_exit()，只会使主函数所在的线程（可以说是进程的主线程）退出；而如果是return，编译器将使其调用进程退出的代码（如_exit()），从而导致进程及其所有线程结束运行。
+其次，在线程宿主函数中主动调用return，如果return语句包含在pthread_cleanup_push()/pthread_cleanup_pop()对中，则不会引起清理函数的执行，反而会导致segment fault。*
+
+### 线程分离
+```
+int pthread_detach(pthread_t tid);
+```
+通常由子线程自身调用pthread_detach(pthread_self())或父线程调用pthread_detach(tid)。
+
+## ThreadAttribute
+线程属性封装类,包括Name、StackSize、Detach、Priority。
+```
+class ThreadAttribute
+{
+public:
+    ThreadAttribute() {
+    pthread_attr_init(&m_atrr);
+    }
+    ~ThreadAttribute() {
+    pthread_attr_destroy(&m_attr);
+    }
+    ThreadAttribute& SetName(const std::string& name);
+
+    ThreadAttribute& SetStackSize(size_t size) {
+    pthread_attr_setstacksize(&m_attr, size);
+    return *this;
+    }
+
+    ThreadAttribute& SetDetached(bool detached) {
+    pthread_attr_setdetachstate(&m_attr, detached);
+    return *this;
+    }  
+
+    // 暂时没有实现。
+    ThreadAttribute& SetPriority(int priority){
+    }
+private:
+    std::string m_name;
+    pthread_attr_t m_attr;
+};
+```
+Priority暂时没有实现，若需要实现可以参考http://blog.chinaunix.net/uid-25909722-id-3025534.htm
+
+## BaseThread
+
+```
+class BaseThread {
+    // 友元类Thread
+    friend class Thread;
+
+    public:
+    // 用于跨平台，__unix__下为pthread_t
+    typedef ThreadHandleType HandleType;
+
+    protected:
+    // 内部调用Initialize
+    BaseThread();
+
+    public:
+    // 内部判断线程是否是Joinable，若是则Join;反之，直接退出
+    virtual ~BaseThread();
+
+    // Wait for thread termination the thread must be started and not detached
+    bool Join();
+    // 之所以采用这种判断方式，是因为如果已经调用了Join()/Detach()，那么m_Handle将会被赋予初始值，即pthread_t()
+    bool IsJoinable() const {
+        return !pthread_equal(m_Handle, pthread_t());
+    }
+
+    // Whether the SendStopRequest or StopAndWaitForExit called
+    bool IsStopRequested() const;
+
+    void SendStopRequest() {
+        m_bStopRequested = true;
+    }
+
+    bool StopAndWaitForExit() {
+        if (IsJoinable()) {
+            m_bStopRequested = true;
+            return Join();
+        }
+        return false;
+    }
+
+    private:
+    // 静态成员函数和静态变量
+    static pthread_once_t s_InitializeOnce;
+    static pthread_key_t  s_nMainKey;
+    static void* StaticEntry(void* inThread);
+    static size_t s_DefaultStackSize;
+
+    // 非静态
+    HandleType m_Handle;
+    int m_Id;
+    size_t m_StackSize;
+    volatile bool m_bStopRequested;
+    volatile bool m_IsAlive; 
+};
+```

@@ -1,0 +1,216 @@
+# SkipList
+
+本文主要介绍`LevelDB`中`SkipList`的实现。
+## 1. SkipList成员变量
+``` C++
+enum { kMaxHeight = 12 };
+
+// Immutable after construction
+Comparator const compare_;
+Arena* const arena_; // Arena used for allocations of nodes
+
+Node* const head_;
+
+// Modified only by Insert().  
+// Read racily by readers, but stale values are ok.
+port::AtomicPointer max_height_;   // Height of the entire list
+
+// Read/written only by Insert().
+Random rnd_;
+```
+其中，
+`Compartor`是作为`SkipList`的模板参数传入。
+`Arena`是`LevelDB`内存管理器，负责内存申请及回收。
+`Node`是具体的节点，同样也是个模板类。
+
+## 2. SkipList内部类
+
+### 2.1 SkipList::Node
+
+`SkipList::Node`是SkipList的内部类。
+```
+// Implementation details follow 
+template<typename Key, class Comparator> 
+struct SkipList<Key,Comparator>::Node { 
+  explicit Node(const Key& k) : key(k) { } 
+  Key const key; 
+  // Accessors/mutators for links.  Wrapped in methods so we can 
+  // add the appropriate barriers as necessary. 
+  Node* Next(int n) { 
+    assert(n >= 0); 
+    // Use an 'acquire load' so that we observe a fully initialized 
+    // version of the returned Node. 
+    return reinterpret_cast<Node*>(next_[n].Acquire_Load()); 
+  } 
+  void SetNext(int n, Node* x) { 
+    assert(n >= 0); 
+    // Use a 'release store' so that anybody who reads through this 
+    // pointer observes a fully initialized version of the inserted node. 
+    next_[n].Release_Store(x); 
+  } 
+  // No-barrier variants that can be safely used in a few locations. 
+  Node* NoBarrier_Next(int n) { 
+    assert(n >= 0); 
+    return reinterpret_cast<Node*>(next_[n].NoBarrier_Load()); 
+  } 
+  void NoBarrier_SetNext(int n, Node* x) { 
+    assert(n >= 0); 
+    next_[n].NoBarrier_Store(x); 
+  } 
+ private: 
+  // Array of length equal to the node height.  next_[0] is lowest level link. 
+  port::AtomicPointer next_[1]; 
+}; 
+```
+**柔性数组**， 注意到next_ 是一个长度为1的数组。这是出于移植性的考虑，有些编译器不支持[0]数组，可将其改成[]或[1]。 
+
+可以`SkipList::NewNode()`调用来创建一个`Node`，其实现是调用`Arena::AllocateAligned`,后续章节会具体介绍`Arena`。
+``` C++
+template<typename Key, class Comparator>
+typename SkipList<Key,Comparator>::Node*
+SkipList<Key,Comparator>::NewNode(const Key& key, int height) {
+  char* mem = arena_->AllocateAligned(
+      sizeof(Node) + sizeof(port::AtomicPointer) * (height - 1));
+  return new (mem) Node(key);
+}
+```
+由于`next_`是长度为1的柔性数组，因此分配的空间大小为`sizeof(Node) + sizeof(port::AtomicPointer) * (height - 1)`。
+
+### 2.2 SkipList::Iterator
+`Iteraotr`用于遍历整个`SkipList`。
+
+``` C++
+// Iteration over the contents of a skip list
+class Iterator {
+   public:
+    // Initialize an iterator over the specified list.
+    // The returned iterator is not valid.
+    explicit Iterator(const SkipList* list);
+
+    // Returns true iff the iterator is positioned at a valid node.
+    bool Valid() const;
+
+    // Returns the key at the current position.
+    // REQUIRES: Valid()
+    const Key& key() const;
+
+    // Advances to the next position.
+    // REQUIRES: Valid()
+    void Next();
+
+    // Advances to the previous position.
+    // REQUIRES: Valid()
+    void Prev();
+
+    // Advance to the first entry with a key >= target
+    void Seek(const Key& target);
+
+    // Position at the first entry in list.
+    // Final state of iterator is Valid() iff list is not empty.
+    void SeekToFirst();
+
+    // Position at the last entry in list.
+    // Final state of iterator is Valid() iff list is not empty.
+    void SeekToLast();
+
+   private:
+    const SkipList* list_;
+    Node* node_;
+    // Intentionally copyable
+};
+```
+
+`Iterator`通过传入一个`SkipList*`进行初始化，注意其返回的`Iterator`并不是有效的，因为`node_`在初始化过程中只是简单的赋为`NULL`，其成员函数`key()`、`Next()`、`Prev()`的调用前提是保证`Valid()`返回`true`,因此必须调用Seek开头的几个函数来使迭代器有效。
+
+## 3. SkipList成员函数
+
+``` C++
+public:
+  // Create a new SkipList object that will use "cmp" for comparing keys,
+  // and will allocate memory using "*arena".  Objects allocated in the arena
+  // must remain allocated for the lifetime of the skiplist object.
+  explicit SkipList(Comparator cmp, Arena* arena);
+
+  // Insert key into the list.
+  // REQUIRES: nothing that compares equal to key is currently in the list.
+  void Insert(const Key& key);
+
+  // Returns true iff an entry that compares equal to key is in the list.
+  bool Contains(const Key& key) const; 
+  
+private:
+  inline int GetMaxHeight() const {
+    return static_cast<int>(
+        reinterpret_cast<intptr_t>(max_height_.NoBarrier_Load()));
+  }
+
+  Node* NewNode(const Key& key, int height);
+  
+  int RandomHeight();
+  
+  bool Equal(const Key& a, const Key& b) const { return (compare_(a, b) == 0); }
+  
+  // Return true if key is greater than the data stored in "n"
+  bool KeyIsAfterNode(const Key& key, Node* n) const;
+  
+  // Return the earliest node that comes at or after key.
+  // Return NULL if there is no such node.
+  //
+  // If prev is non-NULL, fills prev[level] with pointer to previous
+  // node at "level" for every level in [0..max_height_-1].
+  Node* FindGreaterOrEqual(const Key& key, Node** prev) const;
+  
+  // Return the latest node with a key < key.
+  // Return head_ if there is no such node.
+  Node* FindLessThan(const Key& key) const;
+  
+  // Return the last node in the list.
+  // Return head_ if list is empty.
+  Node* FindLast() const;
+  
+  // No copying allowed
+  SkipList(const SkipList&);
+  void operator=(const SkipList&);
+```
+
+首先看`FindGreaterOrEqual`函数，这个是跳表工作的**核心函数**之一。
+```
+template<typename Key, class Comparator>
+typename SkipList<Key,Comparator>::Node* SkipList<Key,Comparator>::FindGreaterOrEqual(const Key& key, Node** prev)
+    const {
+  Node* x = head_;
+  int level = GetMaxHeight() - 1;
+  while (true) {
+    Node* next = x->Next(level);
+    if (KeyIsAfterNode(key, next)) {
+      // Keep searching in this list
+      x = next;
+    } else {
+      if (prev != NULL) prev[level] = x;
+      if (level == 0) {
+        return next;
+      } else {
+        // Switch to next list
+        level--;
+      }
+    }
+  }
+}
+```
+入参是一个key值， 出参是`Node** prev`, `prev`指向一个`Node*`的数组，数组的下标即为层次，`prev[i]`实际上指向了在第`i`层的下界的结点，即要找的位置在第`i`层起码在`prev[i]`指向的结点之后。传入非空的`prev`，通常是用于`Insert`的时候使用。具体见`SkipList::Insert`
+
+第4行，用x指向头结点。
+第5行，获取最高层级。
+第7行，`Node* next = x->Next(level);`获取当前层级当前结点的下一个结点。
+第8-19行，通过`KeyIsAfterNode(key, next)`函数判断key是否在next指向的结点之后。若是，则继续在当前层查找。否则，用prev[level]记录当前层的下界结点，并往下跳一层，如果当前层已经是最底层，说明查找结束。
+
+整个查找过程的示意图[（示意图来源）](http://blog.csdn.net/ict2014/article/details/17394259 "示意图来源")：
+![FindGreaterOrEqual](index_files/FindGreaterOrEqual.jpg "FindGreaterOrEqual")
+
+`FindLessThan`与之类似，`FindLast`比较简单，二者都不再详细说明了。
+
+**引用**
+[1.柔性数组引用][0]
+[0]: http://blog.csdn.net/fengbingchun/article/details/24185217 "柔性数组"
+[2.浅析SkipList跳跃表原理及代码实现][1]
+[1]: http://blog.csdn.net/ict2014/article/details/17394259[http://blog.csdn.net/ict2014/article/details/17394259](http://blog.csdn.net/ict2014/article/details/17394259) "浅析SkipList跳跃表原理及代码实现"
